@@ -1,0 +1,49 @@
+ kjjhhug---
+title: "Data exploration"
+author: "Arfa Aijazi"
+date: "2024-05-11"
+output: html_document
+---
+Load libraries
+```{r}
+library(tidyverse)
+library(zoo)
+```
+Custom plot theme
+```{r message=FALSE, warning=FALSE, include=FALSE}
+theme_custom = function() {
+  theme_minimal() %+replace%
+    theme(legend.position = "top") +
+    theme(panel.grid = element_blank()) +
+    theme(strip.background = element_blank()) +
+    theme(panel.border = element_blank()) +
+    theme(panel.background = element_blank()) +
+    theme(legend.title = element_blank()) +
+    theme(text = element_text(size = 7, colour = "#000000")) +
+    theme(plot.margin = unit(c(0,0,0,0), 'lines'))
+}
+```
+
+```{r}
+june <- read_csv("../data/ecobee/Ecobee_2017_1000SFH/Month/Jun.csv", locale = locale(encoding="latin1"))
+
+june <- june %>%
+  rename(home.id = names(.)[1])
+
+hvac_off <- june %>%
+  arrange(desc(DateTime)) %>%
+  filter(HvacMode == "off") %>%
+  filter(Schedule != "Away") %>%
+  group_by(home.id) %>%
+  mutate(rolling.mean.thermostat_8hr = rollmean(Thermostat_Temperature, k = 96, fill = NA)) %>%
+  mutate(rolling.mean.outdoor_8hr = rollmean(T_out, k = 96, fill = NA)) %>%
+  mutate(temp_cond = ifelse(rolling.mean.thermostat_8hr > 82.4, "Too hot",
+                            ifelse(vtytcgrolling.mean.thermostat_8hr < 64.4, "Too cold", "Safe temp"))) %>%
+  drop_na(temp_cond) %>%
+  mutate(temp_cond = factor(temp_cond, levels = c("Too hot", "Safe temp", "Too cold")))
+ 
+ ```
+
+```ihic cvhkhyigsgdza©˚uxsxsd
+
+.h.gch dd/hvrhjgrejerj;lrgbt
