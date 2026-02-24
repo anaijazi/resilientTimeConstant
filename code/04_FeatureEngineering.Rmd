@@ -1,0 +1,114 @@
+---
+title: "Untitled"
+author: "Arfa Aijazi"
+date: "2025-08-06"
+output: html_document
+---
+
+```{r}
+library(dplyr)
+library(lubridate)
+library(RcppRoll)
+```
+
+```{r}
+final_data <- read_csv("../data/final_data.csv")
+```
+Feature engineering
+```{r}
+library(dplyr)
+library(lubridate)
+library(RcppRoll)
+library(purrr)
+
+# Define U.S. federal holidays for 2017
+holidays_2017 <- ymd(c(
+  "2017-01-02", "2017-01-16", "2017-02-20", "2017-05-29",
+  "2017-07-04", "2017-09-04", "2017-10-09", "2017-11-10",
+  "2017-11-23", "2017-12-25"
+))
+
+# Define the features to apply lags and rolling averages to
+lag_roll_features <- c(
+  "Thermostat_Temperature", "Humidity", "T_out", "RH_out", "DHI", "DNI",
+  "GHI", "sin_wind_dir", "cos_wind_dir", "Wind_Speed"
+)
+
+# Define the time steps in hours for the features (converted to 5-min increments)
+time_steps <- c(0.25, 0.5, 1, 4, 8, 12, 24)
+n_rows <- time_steps * 12
+
+# Function to create lagged features
+create_lag_features <- function(data, feature, n_rows) {
+  lag_name <- paste0(feature, "_lag_", n_rows / 12, "h")
+  data %>%
+    mutate(!!lag_name := lag(!!sym(feature), n = n_rows))
+}
+
+# Function to create rolling average features
+create_roll_features <- function(data, feature, n_rows) {
+  roll_name <- paste0(feature, "_rollavg_", n_rows / 12, "h")
+  data %>%
+    mutate(!!roll_name := RcppRoll::roll_mean(!!sym(feature), n = n_rows, align = "right", na.rm = TRUE, fill = NA))
+}
+
+# Start with your initial data frame and time-based features
+engineered_data <- final_data %>%
+  select(-Identifier, -State, -T_ctrl, -starts_with("auxHeat"), -starts_with("comp"), -fan, - starts_with("Remote")) %>%
+  arrange(DateTime) %>%
+  mutate(
+    hour = hour(DateTime),
+    day_of_week = wday(DateTime, label = TRUE),
+    is_weekend = factor(case_when(day_of_week %in% c("Sat", "Sun") ~ TRUE, .default = FALSE)),
+    is_holiday = factor(as.Date(DateTime) %in% holidays_2017),
+    season = case_when(
+      DateTime > ymd("2017-03-20") & DateTime <= ymd("2017-06-20") ~ "Spring",
+      DateTime > ymd("2017-06-20") & DateTime <= ymd("2017-09-22") ~ "Summer",
+      DateTime > ymd("2017-09-22") & DateTime <= ymd("2017-12-21") ~ "Autumn",
+      TRUE ~ "Winter"
+    ),
+    HVAC_off = case_when(
+      HvacMode == "off" ~ TRUE,
+      Thermostat_Temperature > T_stp_heat + 2 & Thermostat_Temperature < T_stp_cool - 2 ~ TRUE,
+      .default = FALSE
+    )
+  )
+
+# Loop to create all lag and rolling average features
+for (feature in lag_roll_features) {
+  for (n_val in n_rows) {
+    engineered_data <- create_lag_features(engineered_data, feature, n_val)
+    engineered_data <- create_roll_features(engineered_data, feature, n_val)
+  }
+}
+
+# View the new column names
+glimpse(engineered_data)
+```
+```{r}
+library(dplyr)
+
+# Assuming 'engineered_data' is your data frame from the previous step,
+# and it already has the 'HVAC_off' column.
+
+engineered_data_with_duration <- engineered_data %>%
+  # Create a unique ID for each continuous run of 'HVAC_off'
+  group_by(run_id = cumsum(!HVAC_off)) %>%
+  # Calculate the duration in minutes for each row within the group
+  mutate(HVAC_off_duration_min = if_else(
+    HVAC_off,
+    (row_number() - 1) * 5,
+    0
+  )) %>%
+  ungroup() %>%
+  # Remove the temporary grouping variable
+  select(-run_id)
+```
+
+```{r}
+final_engineered_data <- engineered_data_with_duration
+```
+
+```{r}
+write_csv(final_engineered_data, "../data/final_engineered_data.csv")
+```

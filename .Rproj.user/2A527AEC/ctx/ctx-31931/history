@@ -1,0 +1,18 @@
+library(tidyverse)
+# Set the desired variables
+min_duration_hours <- 1 # Periods must now last at least 1 hour
+max_t_out_range <- 2 # Outdoor temp range should be within 2 degrees
+min_temp_change <- 2 # Minimum indoor air temperature change in degrees
+table <- read_csv("../data/table.csv")
+# Convert the DateTime column to a POSIXct datetime object
+table$DateTime <- ymd_hms(table$DateTime)
+# Add a season column based on outdoor temperature (a simple heuristic)
+table <- table %>%
+mutate(month = month(DateTime)) %>%
+mutate(season = case_when(
+month %in% c(12, 1, 2, 3) ~ "heating",
+month %in% c(6, 7, 8, 9) ~ "cooling",
+TRUE ~ "other"
+))
+library(tidyverse)
+library(tidyverse)

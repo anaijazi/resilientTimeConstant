@@ -1,0 +1,88 @@
+---
+title: "Untitled"
+author: "Arfa Aijazi"
+date: "2025-08-06"
+output: html_document
+---
+
+```{r}
+library(caret)
+library(tidyverse)
+```
+
+```{r}
+final_engineered_data <- read_csv("../data/final_engineered_data.csv")
+```
+
+Remove first 288 rows, representing NA values for 24-hour lagged and rolling averages. Filter for HVAC_off, which represents timesteps where HvacMode is off or interior temperature is within dead-band of heating and cooling setpoint. Also remove HvacMode column and heating and cooling setpoints. Encode TRUE/FALSE features to 0 and 1 so that they are handled as numeric versus factors.
+
+```{r}
+data_clean <- final_engineered_data %>%
+  slice(-(1:288)) %>%
+  filter(HVAC_off == TRUE) %>%
+  select(-HvacMode, -starts_with("T_stp"), -HVAC_off, -starts_with("Event"), -Wind_Direction) %>%
+  mutate(is_weekend = ifelse(is_weekend == TRUE, 1, 0)) %>%
+  mutate(is_holiday = ifelse(is_holiday == TRUE, 1, 0))
+```
+
+Create dummy vars
+
+```{r}
+dummies <- dummyVars(Thermostat_Temperature ~ ., data = data_clean)
+data_dummies <- as.data.frame(predict(dummies, newdata = data_clean))
+
+data_dummies$Thermostat_Temperature <- data_clean$Thermostat_Temperature
+data_dummies$DateTime <- data_clean$DateTime
+```
+
+Zero and near-zero variance predictors
+
+```{r}
+nzv <- nearZeroVar(data_dummies, saveMetrics = T)
+
+# Near-zero variance predictors mostly relate to solar radiation. Keeping these variables in the model at this point. is_holiday is also near-zero variance, but that is to be expected (10 days out of 365 days in the year). 
+```
+
+Identify correlated predictors
+
+```{r}
+data_noNA <- data_dummies %>%
+  na.omit()
+
+data_numeric <- data_noNA %>%
+  mutate(DateTime = as.numeric(data_noNA$DateTime))
+
+descrCor <-  cor(data_numeric)
+
+highlyCorDescr <- findCorrelation(descrCor, cutoff = .999)
+highlyCorDescr <- sort(highlyCorDescr)
+highly_correlated_features <- names(data_numeric)[highlyCorDescr]
+print(highly_correlated_features)
+filteredDescr <- data_numeric[,-highlyCorDescr]
+filteredDescr$Thermostat_Temperature <- data_numeric$Thermostat_Temperature
+
+# Removes 10 columns
+```
+
+Linear dependencies
+
+```{r}
+comboInfo <- findLinearCombos(filteredDescr)
+comboInfo
+
+linear_combo_features <- names(filteredDescr)[comboInfo$remove]
+print(linear_combo_features)
+
+filteredDescr2 <- filteredDescr[, -comboInfo$remove]
+
+# removes one day of the week and season for redundancy. Weekend is also redundant since already checking for Saturday and Sunday.
+```
+
+```{r}
+final_preprocessed_data <- filteredDescr2
+final_preprocessed_data$DateTime <- data_noNA$DateTime
+```
+
+```{r}
+write_csv(final_preprocessed_data, "../data/final_preprocessed_data.csv")
+```

@@ -1,0 +1,71 @@
+---
+title: "Untitled"
+author: "Arfa Aijazi"
+date: "2025-08-06"
+output: html_document
+---
+```{r}
+library(caret)
+library(tidyverse)
+
+# 1. LOAD DATA
+final_engineered_data <- read_csv("../data/final_engineered_data.csv")
+
+# 2. INITIAL CLEANING & FILTERING
+data_clean <- final_engineered_data %>%
+  slice(-(1:288)) %>%
+  filter(HVAC_off == TRUE) %>%
+  select(-HvacMode, -starts_with("T_stp"), -HVAC_off, -starts_with("Event"), -Wind_Direction) %>%
+  mutate(across(c(is_weekend, is_holiday), ~ as.numeric(.x))) %>%
+  # Handle any NAs that might have been introduced or remained
+  drop_na() 
+
+# 3. CREATE DUMMY VARIABLES
+dummies <- dummyVars(Thermostat_Temperature ~ . - DateTime, data = data_clean)
+data_dummies <- as.data.frame(predict(dummies, newdata = data_clean))
+
+# Re-attach target and DateTime
+data_dummies$Thermostat_Temperature <- data_clean$Thermostat_Temperature
+data_dummies$DateTime <- data_clean$DateTime
+
+# 4. ZERO AND NEAR-ZERO VARIANCE (REFINED)
+# We must remove columns with ZERO variance before findLinearCombos
+nzv <- nearZeroVar(data_dummies %>% select(-DateTime), saveMetrics = TRUE)
+
+# Critical Fix: Ensure we only keep columns that are NOT near-zero variance
+keep_cols <- rownames(nzv[nzv$nzv == FALSE, ])
+data_nzv_filtered <- data_dummies[, c(keep_cols, "DateTime")]
+
+# 5. IDENTIFY CORRELATED PREDICTORS (Cutoff 0.90)
+data_for_cor <- data_nzv_filtered %>%
+  select(-DateTime, -Thermostat_Temperature)
+
+descrCor <- cor(data_for_cor)
+highlyCorDescr <- findCorrelation(descrCor, cutoff = .90)
+highly_correlated_features <- colnames(data_for_cor)[highlyCorDescr]
+
+data_cor_filtered <- data_nzv_filtered %>%
+  select(-all_of(highly_correlated_features))
+
+# 6. LINEAR DEPENDENCIES (WITH SAFETY CHECK)
+# Error fix: Ensure data is numeric and has no constants
+data_for_combos <- data_cor_filtered %>% 
+  select(-DateTime) %>%
+  # Remove any column that might have become constant after correlation filtering
+  select(where(~ var(.) > 0)) 
+
+# Now run findLinearCombos
+comboInfo <- findLinearCombos(data_for_combos)
+
+if(!is.null(comboInfo$remove)) {
+  final_preprocessed_data <- data_cor_filtered %>% 
+    select(-colnames(data_for_combos)[comboInfo$remove])
+} else {
+  final_preprocessed_data <- data_cor_filtered
+}
+
+# 7. SAVE FINAL DATA
+write_csv(final_preprocessed_data, "../data/final_preprocessed_data.csv")
+cat("\nPre-processing complete. Success!\n")
+```
+

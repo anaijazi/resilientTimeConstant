@@ -1,0 +1,204 @@
+```{r}
+library(caret)
+library(tidyverse)
+library(lubridate)
+library(forecast) 
+library(keras)    
+
+# ======================================================================
+# 1. ENGINES: THE SWITCHBOARD CORES
+# ======================================================================
+
+# --- ENGINE 0: NAIVE PERSISTENCE ---
+engine_naive <- function(train_df, test_df) {
+  last_val <- tail(train_df$Thermostat_Temperature, 1)
+  preds <- rep(last_val, nrow(test_df))
+  return(list(preds = as.numeric(preds), imp = NULL))
+}
+
+# --- ENGINE A: REGRESSION (LM, RF, GBM) ---
+engine_regression <- function(train_df, test_df, algo) {
+  # Clean out constant columns for this specific window
+  train_x <- train_df %>% 
+    select(-DateTime, -Thermostat_Temperature) %>% 
+    select(where(~n_distinct(.) > 1))
+  
+  target <- train_df$Thermostat_Temperature
+  
+  # Train model
+  mod <- train(
+    y = target,
+    x = train_x,
+    method = algo,
+    trControl = trainControl(method = "none"),
+    preProcess = c("center", "scale")
+  )
+  
+  # Extract Importance for LM only (to explain why it's winning)
+  importance_df <- NULL
+  if(algo == "lm") {
+    importance_df <- varImp(mod)$importance %>% 
+      as.data.frame() %>% 
+      rownames_to_column("Feature") %>%
+      rename(Importance = Overall) %>%
+      arrange(desc(Importance))
+  }
+  
+  preds <- predict(mod, newdata = test_df[, colnames(train_x)])
+  return(list(preds = as.numeric(preds), imp = importance_df))
+}
+
+# --- ENGINE B: STATISTICAL (ARIMA, SARIMA, SARIMAX) ---
+engine_stat_ts <- function(train_df, test_df, algo) {
+  y_ts <- ts(train_df$Thermostat_Temperature, frequency = 288)
+  
+  if (algo == "sarimax") {
+    x_train <- as.matrix(train_df %>% select(-DateTime, -Thermostat_Temperature) %>% select(where(~n_distinct(.) > 1)))
+    fit <- auto.arima(y_ts, xreg = x_train, stepwise = TRUE, approximation = TRUE)
+    fcast <- forecast(fit, xreg = as.matrix(test_df[, colnames(x_train)]), h = nrow(test_df))
+  } else {
+    fit <- auto.arima(y_ts, seasonal = (algo == "sarima"), stepwise = TRUE, approximation = TRUE)
+    fcast <- forecast(fit, h = nrow(test_df))
+  }
+  return(list(preds = as.numeric(fcast$mean), imp = NULL))
+}
+
+# --- ENGINE C: DEEP LEARNING (LSTM, RNN) ---
+engine_deep_learning <- function(train_df, test_df, algo) {
+  prep <- preProcess(train_df %>% select(-DateTime), method = "range")
+  train_s <- predict(prep, train_df %>% select(-DateTime))
+  test_s  <- predict(prep, test_df %>% select(-DateTime))
+  
+  x_train <- array(as.matrix(train_s %>% select(-Thermostat_Temperature)), 
+                   dim = c(nrow(train_s), 1, ncol(train_s)-1))
+  y_train <- as.matrix(train_s$Thermostat_Temperature)
+  
+  model <- keras_model_sequential()
+  if(algo == "lstm") {
+    model %>% layer_lstm(units = 16, input_shape = c(1, ncol(train_s)-1))
+  } else {
+    model %>% layer_simple_rnn(units = 16, input_shape = c(1, ncol(train_s)-1))
+  }
+  
+  model %>% layer_dense(units = 1) %>% compile(loss = 'mae', optimizer = 'adam')
+  model %>% fit(x_train, y_train, epochs = 5, batch_size = 256, verbose = 0)
+  
+  x_test <- array(as.matrix(test_s %>% select(-Thermostat_Temperature)), 
+                  dim = c(nrow(test_s), 1, ncol(test_s)-1))
+  s_preds <- model %>% predict(x_test)
+  
+  t_min <- prep$ranges[1, "Thermostat_Temperature"]
+  t_max <- prep$ranges[2, "Thermostat_Temperature"]
+  final_preds <- s_preds * (t_max - t_min) + t_min
+  
+  return(list(preds = as.numeric(final_preds), imp = NULL))
+}
+
+# ======================================================================
+# 2. CONFIGURATION & DATA LOADING
+# ======================================================================
+
+data_master <- read_csv("../data/final_preprocessed_data.csv", show_col_types = FALSE)
+
+MODELS <- c("naive", "lm", "rf", "gbm", "arima", "sarima", "sarimax", "lstm", "rnn")
+WEEKS  <- c(1, 4, 8) 
+N_ITER <- 2 
+
+test_set <- data_master %>% filter(DateTime >= ymd("2017-08-25") & DateTime <= ymd("2017-09-07"))
+
+seasonal_blocks <- list(
+  Winter = list(start = ymd("2017-01-01"), end = ymd("2017-03-19")),
+  Spring_Summer_Hybrid = list(start = ymd("2017-05-07"), end = ymd("2017-08-04"))
+)
+
+# ======================================================================
+# 3. RUN AUDITION LOOP
+# ======================================================================
+
+results <- data.frame()
+lm_importance_list <- list()
+
+for (m in MODELS) {
+  cat("\nAuditioning:", toupper(m))
+  
+  for (period in names(seasonal_blocks)) {
+    base_train <- data_master %>% 
+      filter(DateTime >= seasonal_blocks[[period]]$start & DateTime <= seasonal_blocks[[period]]$end)
+    
+    for (wk in WEEKS) {
+      row_size <- floor(wk * (7 * 24 * 60 / 5))
+      
+      for (i in 1:N_ITER) {
+        # --- CAPACITY CHECK & SAMPLING ---
+        if (nrow(base_train) <= row_size) {
+          temp_train <- base_train
+        } else {
+          start_idx  <- sample(1:(nrow(base_train) - row_size + 1), 1)
+          temp_train <- base_train %>% slice(start_idx:(start_idx + row_size - 1))
+        }
+        
+        # --- ROUTING ---
+        res <- tryCatch({
+          if (m == "naive") engine_naive(temp_train, test_set)
+          else if (m %in% c("lm", "rf", "gbm")) engine_regression(temp_train, test_set, m)
+          else if (m %in% c("arima", "sarima", "sarimax")) engine_stat_ts(temp_train, test_set, m)
+          else engine_deep_learning(temp_train, test_set, m)
+        }, error = function(e) {
+          cat(paste0("\n Error in ", m, ": ", e$message))
+          return(NULL)
+        })
+        
+        if(!is.null(res)) {
+          rmse <- sqrt(mean((res$preds - test_set$Thermostat_Temperature)^2, na.rm = TRUE))
+          results <- bind_rows(results, data.frame(
+            Model = m, Season = period, Weeks = wk, Iteration = i, RMSE = rmse
+          ))
+          
+          # Capture LM importance if available
+          if(m == "lm" && !is.null(res$imp)) {
+            lm_importance_list[[paste(period, wk, i, sep="_")]] <- res$imp
+          }
+        }
+      }
+    }
+    cat(".") 
+  }
+}
+
+# ======================================================================
+# 4. FINAL ANALYSIS & SKILL SCORES
+# ======================================================================
+
+# 4.1 Performance Ranking
+naive_rmse <- mean(results$RMSE[results$Model == "naive"], na.rm = TRUE)
+
+summary_table <- results %>%
+  group_by(Model) %>%
+  summarise(
+    Avg_RMSE = mean(RMSE),
+    SD_RMSE = sd(RMSE),
+    Skill_Score = round((1 - (Avg_RMSE / naive_rmse)) * 100, 1)
+  ) %>%
+  arrange(desc(Skill_Score))
+
+cat("\n\n--- FINAL AUDITION SUMMARY ---\n")
+print(summary_table)
+
+# 4.2 Feature Importance (The "Why")
+if(length(lm_importance_list) > 0) {
+  cat("\n--- TOP LINEAR DRIVERS ---\n")
+  final_imp <- bind_rows(lm_importance_list) %>%
+    group_by(Feature) %>%
+    summarise(Avg_Importance = mean(Importance)) %>%
+    arrange(desc(Avg_Importance))
+  print(head(final_imp, 10))
+}
+
+# 4.3 Visualization
+ggplot(results, aes(x = reorder(Model, -RMSE), y = RMSE, fill = Model)) +
+  geom_boxplot() + coord_flip() + theme_minimal() +
+  labs(title = "Model Audition: RMSE Comparison",
+       subtitle = "Comparing Baseline vs Regression vs Statistical vs Deep Learning")
+```
+
+

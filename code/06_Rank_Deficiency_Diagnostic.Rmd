@@ -1,0 +1,92 @@
+---
+title: "Untitled"
+author: "Arfa Aijazi"
+date: "2026-02-23"
+output: html_document
+---
+```{r}
+library(tidyverse)
+library(caret)
+
+# 1. LOAD PREPROCESSED DATA
+data <- read_csv("../data/final_preprocessed_data.csv", show_col_types = FALSE)
+
+# ======================================================================
+# STEP A: GLOBAL RANK DEFICIENCY (Perfect Redundancy)
+# ======================================================================
+cat("\n--- [1] GLOBAL RANK DEFICIENCY CHECK ---\n")
+global_fit <- lm(Thermostat_Temperature ~ ., data = data %>% select(-DateTime))
+global_alias <- alias(global_fit)
+
+if(!is.null(global_alias$Complete)) {
+  cat("!!! WARNING: Perfect Global Redundancy Found !!!\n")
+  print(rownames(global_alias$Complete))
+} else {
+  cat("Success: No perfect global linear dependencies.\n")
+}
+
+# ======================================================================
+# STEP B: TARGET CORRELATION (Weak Predictor Check)
+# ======================================================================
+cat("\n--- [2] WEAK PREDICTOR CHECK (Cor with Target) ---\n")
+cor_matrix <- data %>%
+  select(-DateTime) %>%
+  cor() %>%
+  as.data.frame()
+
+target_cor <- cor_matrix %>%
+  select(Thermostat_Temperature) %>%
+  rename(Correlation = Thermostat_Temperature) %>%
+  arrange(desc(abs(Correlation)))
+
+# Threshold 0.02: Variables below this add almost no predictive value
+weak_features <- target_cor %>% 
+  filter(abs(Correlation) < 0.02)
+
+if(nrow(weak_features) > 0) {
+  cat("The following variables have < 0.02 correlation with Thermostat_Temperature:\n")
+  print(weak_features)
+} else {
+  cat("All variables show a baseline correlation > 0.02.\n")
+}
+
+# ======================================================================
+# STEP C: SEASONAL RANK KILLERS (The "100% Deficiency" Cause)
+# ======================================================================
+cat("\n--- [3] SEASONAL RANK KILLER CHECK ---\n")
+
+seasonal_blocks <- list(
+  Winter = list(start = as.Date("2017-01-01"), end = as.Date("2017-03-19")),
+  Spring = list(start = as.Date("2017-03-20"), end = as.Date("2017-06-20")),
+  Summer = list(start = as.Date("2017-06-21"), end = as.Date("2017-08-24")),
+  Winter_Spring_Hybrid = list(start = as.Date("2017-02-04"), end = as.Date("2017-05-04")),
+  Spring_Summer_Hybrid = list(start = as.Date("2017-05-07"), end = as.Date("2017-08-04"))
+)
+
+all_dropped_vars <- c()
+
+for (period in names(seasonal_blocks)) {
+  sub_data <- data %>%
+    filter(DateTime >= seasonal_blocks[[period]]$start & 
+           DateTime <= seasonal_blocks[[period]]$end) %>%
+    select(-DateTime)
+  
+  # Diagnostic Fit
+  fit <- lm(Thermostat_Temperature ~ ., data = sub_data)
+  dropped <- names(coef(fit))[is.na(coef(fit))]
+  all_dropped_vars <- c(all_dropped_vars, dropped)
+}
+
+# Frequency table: How many seasons does each variable break the model?
+drop_report <- as.data.frame(table(all_dropped_vars)) %>% 
+  rename(Variable = all_dropped_vars, Seasons_Dropped = Freq) %>%
+  arrange(desc(Seasons_Dropped))
+
+if(nrow(drop_report) > 0) {
+  cat("Variables dropped most frequently across seasons:\n")
+  print(drop_report)
+} else {
+  cat("Success: No seasonal rank deficiency detected.\n")
+}
+```
+

@@ -1,0 +1,159 @@
+```{r}
+# ======================================================================
+# QUICK TEST: ALGORITHM & RMSE COMPARISON (N = 1)
+# ======================================================================
+
+library(caret)
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(RColorBrewer)
+library(janitor)
+
+# --- QUICK TEST SETTINGS ---
+MODELS_TO_COMPARE <- c("lm", "rf", "gbm") 
+COR_CUTOFF        <- 0.90 
+SEASON_ORDER      <- c("Winter", "Winter_Spring_Hybrid", "Spring", "Spring_Summer_Hybrid", "Summer")
+N_ITER            <- 1  # Set to 1 for quick test; increase for final production
+ROWS_PER_WK       <- 7 * 24 * 60 / 5
+TARGET_WEEKS_STEPS <- c(1, 2, 4, 6, 8, 12) # For the Learning Curve
+
+# Fixed Test Period
+test_start_date <- ymd("2017-08-25")
+test_end_date   <- ymd("2017-09-07")
+
+seasonal_blocks <- list(
+  Winter = list(start = ymd("2017-01-01"), end = ymd("2017-03-19")),
+  Spring = list(start = ymd("2017-03-20"), end = ymd("2017-06-20")),
+  Summer = list(start = ymd("2017-06-21"), end = ymd("2017-08-24")),
+  Winter_Spring_Hybrid = list(start = ymd("2017-02-04"), end = ymd("2017-05-04")),
+  Spring_Summer_Hybrid = list(start = ymd("2017-05-07"), end = ymd("2017-08-04"))
+)
+
+# --- STEP 1: GLOBAL PRE-PROCESSING ---
+raw_data <- read_csv("../data/final_engineered_data.csv", show_col_types = FALSE)
+
+data_processed <- raw_data %>%
+  slice(-(1:288)) %>%
+  filter(HVAC_off == TRUE) %>%
+  select(-HvacMode, -starts_with("T_stp"), -HVAC_off, -starts_with("Event"), -Wind_Direction) %>%
+  mutate(across(c(is_weekend, is_holiday), as.numeric)) %>%
+  drop_na()
+
+dummies_model <- dummyVars(Thermostat_Temperature ~ . - DateTime, data = data_processed)
+data_dummies  <- as.data.frame(predict(dummies_model, newdata = data_processed))
+data_dummies$Thermostat_Temperature <- data_processed$Thermostat_Temperature
+data_dummies$DateTime <- data_processed$DateTime
+
+cor_mat <- cor(data_dummies %>% select(-DateTime, -Thermostat_Temperature))
+high_cor_vars <- findCorrelation(cor_mat, cutoff = COR_CUTOFF)
+final_base_data <- data_dummies %>% select(-all_of(colnames(cor_mat)[high_cor_vars]))
+
+# --- STEP 2: TRAINING FUNCTION ---
+train_and_predict_multi <- function(train_data, test_data_clean, method_choice) {
+  train_x <- train_data %>% select(-DateTime, -Thermostat_Temperature)
+  
+  nzv_local <- nearZeroVar(train_x, saveMetrics = TRUE)
+  keep_vars <- rownames(nzv_local[nzv_local$nzv == FALSE, ])
+  
+  if(length(keep_vars) == 0) return(list(preds = rep(NA, nrow(test_data_clean))))
+  
+  train_x_f <- train_x[, keep_vars, drop = FALSE]
+  test_x_f  <- test_data_clean[, keep_vars, drop = FALSE]
+  train_df  <- cbind(train_x_f, Thermostat_Temperature = train_data$Thermostat_Temperature)
+  
+  mod <- suppressWarnings(
+    caret::train(
+      Thermostat_Temperature ~ ., data = train_df, method = method_choice,
+      trControl = trainControl(method = "none"), 
+      preProcess = c("center", "scale"),
+      verbose = FALSE 
+    )
+  )
+  
+  list(preds = predict(mod, newdata = test_x_f))
+}
+
+# --- STEP 3: DUAL LOOP (LEARNING CURVE & ALGO COMPARISON) ---
+cat("\nRunning Multi-Algorithm Learning Curve (n=1)...\n")
+test_set <- final_base_data %>% filter(DateTime >= test_start_date & DateTime <= test_end_date)
+test_set_clean <- test_set %>% select(-DateTime, -Thermostat_Temperature)
+
+lc_results <- data.frame()
+ts_results_list <- list()
+
+for (algo in MODELS_TO_COMPARE) {
+  cat(paste0("Processing Algorithm: ", toupper(algo), "\n"))
+  
+  for (period in names(seasonal_blocks)) {
+    base_train <- final_base_data %>%
+      filter(DateTime >= seasonal_blocks[[period]]$start & DateTime <= seasonal_blocks[[period]]$end)
+    
+    # 1. Learning Curve Steps
+    for (weeks in TARGET_WEEKS_STEPS) {
+      row_size <- floor(weeks * ROWS_PER_WK)
+      if (nrow(base_train) < row_size) next
+      
+      for (i in 1:N_ITER) {
+        start_row  <- sample(1:(nrow(base_train) - row_size + 1), 1)
+        temp_train <- base_train %>% slice(start_row:(start_row + row_size - 1))
+        
+        res <- tryCatch(train_and_predict_multi(temp_train, test_set_clean, algo), 
+                        error = function(e) list(preds = rep(NA, nrow(test_set_clean))))
+        
+        rmse <- sqrt(mean((res$preds - test_set$Thermostat_Temperature)^2, na.rm = TRUE))
+        
+        lc_results <- bind_rows(lc_results, data.frame(
+          Algorithm = algo, Period = period, Train_Weeks = weeks, RMSE = rmse
+        ))
+        
+        # Capture Time-Series for the 6-week window specifically for the comparison plot
+        if(weeks == 6) {
+           ts_results_list[[paste(algo, period, sep="_")]] <- test_set %>%
+             select(DateTime, Actual_Temp = Thermostat_Temperature) %>%
+             mutate(Predicted_Temp = res$preds, Algorithm = algo, Period = period)
+        }
+      }
+    }
+  }
+}
+
+# --- STEP 4: VISUALIZATION ---
+
+# Factor Ordering
+lc_results <- lc_results %>% mutate(Period = factor(Period, levels = SEASON_ORDER))
+all_ts_df  <- bind_rows(ts_results_list) %>% mutate(Period = factor(Period, levels = SEASON_ORDER))
+
+# A. RMSE Learning Curve Plot
+p_lc <- ggplot(lc_results, aes(x = Train_Weeks, y = RMSE, color = Algorithm, group = Algorithm)) +
+  geom_line(linewidth = 1) +
+  geom_point() +
+  facet_wrap(~ Period, scales = "free_y") +
+  theme_minimal() +
+  labs(title = "RMSE Learning Curve: Algorithm Comparison",
+       subtitle = "Error vs. Training Size (Weeks) faceted by Season",
+       x = "Training Size (Weeks)", y = "RMSE")
+
+# B. Time-Series Comparison (6-Week training snapshot)
+p_ts <- ggplot(all_ts_df, aes(x = DateTime)) +
+  geom_line(aes(y = Actual_Temp), color = "black", alpha = 0.3) +
+  geom_line(aes(y = Predicted_Temp, color = Algorithm)) +
+  facet_grid(Algorithm ~ Period) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "6-Week Comparison: Peak Detection by Algorithm",
+       y = "Temp (°F)")
+
+print(p_lc)
+print(p_ts)
+```
+
+```{r}
+# View the summary table in your console
+results_summary_lc %>% 
+  select(period, train_size, pct_deficient) %>% 
+  filter(pct_deficient > 0) %>% 
+  print(n=50)
+```
+
+

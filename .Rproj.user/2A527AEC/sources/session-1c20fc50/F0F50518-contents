@@ -1,0 +1,74 @@
+---
+title: "02"
+author: "Arfa Aijazi"
+date: "2025-07-26"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+```
+
+Read identifiers for selected home(s)
+
+```{r}
+full_annual_data_top_identifiers <- read_csv("../data/top_identifiers_full_annual_data.csv")
+```
+
+```{r}
+summer_data_top_identifiers <- full_annual_data_top_identifiers %>%
+  mutate(DateTime = ymd_hms(DateTime)) %>% # Convert to datetime object
+  filter(month(DateTime) %in% c(6, 7, 8, 9))
+```
+
+Plot
+
+```{r}
+ggplot(full_annual_data_top_identifiers, aes(x = DateTime)) + 
+  # geom_line(aes(y = T_out, linetype = Identifier), colour = "grey") +
+  # geom_line(aes(y = T_stp_heat, linetype = Identifier), colour = "blue") +
+  geom_line(aes(y = T_ctrl, colour = Identifier)) +
+  facet_grid(rows = vars(Identifier)) +
+  theme_minimal() +
+  theme(legend.position = "top")
+```
+
+```{r}
+ggplot(summer_data_top_identifiers, aes(x = DateTime)) + 
+  # geom_line(aes(y = T_out, linetype = Identifier), colour = "grey") +
+  # geom_line(aes(y = T_stp_heat, linetype = Identifier), colour = "blue") +
+  geom_line(aes(y = T_ctrl, colour = Identifier)) +
+  # facet_grid(rows = vars(Identifier)) +
+  theme_minimal() +
+  theme(legend.position = "top")
+```
+
+```{r}
+highest_avg_T_ctrl <- summer_data_top_identifiers %>%
+  group_by(Identifier) %>%
+  summarise(avg_T_ctrl = mean(T_ctrl, na.rm = TRUE)) %>%
+  arrange(desc(avg_T_ctrl)) %>%
+  slice_head(n=1)
+
+highest_avg_T_ctrl <- highest_avg_T_ctrl %>%
+  inner_join(meta_data)
+```
+
+```{r}
+highest_T_ctrl_home <- full_annual_data_top_identifiers %>%
+  filter(Identifier == highest_avg_T_ctrl$Identifier)
+```
+
+```{r}
+write_csv(highest_T_ctrl_home, "../data/highest_T_ctrl_home_full_annual_data.csv")
+```
+
+```{r}
+ggplot(highest_T_ctrl_home, aes(x = DateTime)) + 
+  geom_line(aes(y = T_out, linetype = Identifier), colour = "grey") +
+  geom_line(aes(y = T_stp_heat, linetype = Identifier), colour = "blue") +
+  geom_point(aes(y = T_ctrl, colour = HvacMode)) +
+  # facet_grid(rows = vars(Identifier)) +
+  theme_minimal() +
+  theme(legend.position = "top")
+```

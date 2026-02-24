@@ -1,0 +1,66 @@
+---
+title: "03_DataPreProcessing"
+author: "Arfa Aijazi"
+date: "2025-07-28"
+output: html_document
+---
+```{r}
+library(dplyr)
+library(RcppRoll)
+
+
+```
+
+Read identifiers for selected home(s)
+```{r}
+highest_T_ctrl_home <- read_csv("../data/highest_T_ctrl_home_full_annual_data.csv")
+NSRDB_data <- read_csv("../data/NSRDB_2017_los_angeles.csv")
+```
+```{r}
+NSRDB_data_ready <- NSRDB_data %>%
+  mutate(
+    DateTime_combined = paste(Year, Month, Day, Hour, Minute, sep = "-"),
+    DateTime = ymd_hm(DateTime_combined) # Converts to yyyy-mm-dd hh:mm:ss format
+  ) %>%
+  rename(
+    Wind_Direction = "Wind Direction",
+    Wind_Speed = "Wind Speed"
+  ) %>%
+  # Remove the temporary and original date/time columns
+  select(-DateTime_combined, -Year, -Month, -Day, -Hour, -Minute)
+```
+
+```{r}
+merged_data <- highest_T_ctrl_home %>%
+  full_join(NSRDB_data_ready, by = "DateTime") %>%
+  # Ensure the data is sorted by time for proper interpolation later
+  arrange(DateTime)
+
+glimpse(merged_data)
+```
+```{r}
+upsampled_data <- merged_data %>%
+  # Handle circular variable (Wind_Direction) by converting to sine/cosine
+  mutate(
+    sin_wind_dir = sin(Wind_Direction * pi / 180),
+    cos_wind_dir = cos(Wind_Direction * pi / 180)
+  ) %>%
+  # Apply linear interpolation to all specified columns
+  mutate(across(c(DHI, DNI, GHI, Wind_Speed, sin_wind_dir, cos_wind_dir), ~na.approx(.x, na.rm = FALSE)))
+
+# You can now remove the original Wind_Direction column
+# or convert the interpolated sine/cosine back to degrees if needed.
+final_data <- upsampled_data %>%
+  # select(-Wind_Direction) %>% # Optional: remove original column
+  # Optional: convert interpolated sine/cosine back to a single column
+  mutate(Wind_Direction = 360 + atan2(sin_wind_dir, cos_wind_dir) * 180 / pi)
+  # The sine and cosine features are often better for modeling directly.
+  # So you can just keep them as they are.
+
+# View a summary to check for NAs
+glimpse(final_data)
+```
+```{r}
+write_csv(final_data, "../data/final_data.csv")
+```
+

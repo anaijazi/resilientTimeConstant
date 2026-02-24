@@ -1,0 +1,62 @@
+---
+title: "01_SelectTestHomes.Rmd"
+author: "Arfa Aijazi" 
+date: "2025-07-25" 
+output: html_document 
+---
+
+```{r}
+library(tidyverse)
+```
+
+```{r}
+library(dplyr)
+library(purrr)
+library(readr)
+
+files_month = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+file_paths <- paste0("../data/Ecobee_2017_1000SFH/Month/", files_month, ".csv")
+
+# Use map_dfr to read all files and combine them into a single data frame
+table <- map_dfr(file_paths, ~ {
+  read_csv(.x, locale = locale(encoding="latin1")) %>%
+    rename(Identifier = 1) %>%
+    mutate(HVAC_off = case_when(
+      HvacMode == "off" ~ TRUE,
+      T_ctrl > T_stp_heat + 2 & T_ctrl < T_stp_cool - 2 ~ TRUE,
+      .default = FALSE
+    )) %>%
+    filter(HVAC_off)
+})
+```
+
+```{r}
+ # Group the data by Identifier, count the entries, and find the top 5 identifiers
+top_identifiers <- table %>%
+  group_by(Identifier) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count)) %>%
+  slice_head(n=10)
+
+top_ids_list <- top_identifiers$Identifier
+```
+
+```{r}
+full_annual_data_top_identifiers <- map_dfr(file_paths, ~ {
+  read_csv(.x, locale = locale(encoding="latin1")) %>%
+    rename(Identifier = 1) %>%
+    filter(Identifier %in% top_ids_list)
+})
+```
+```{r}
+write_csv(full_annual_data_top_identifiers, "../data/top_identifiers_full_annual_data.csv")
+```
+
+```{r}
+meta_data <- read_csv("../data/Ecobee_2017_1000SFH/meta_data.csv", locale = locale(encoding="latin1")) 
+```
+```{r}
+top_identifiers <- top_identifiers %>%
+  inner_join(meta_data)
+```
+

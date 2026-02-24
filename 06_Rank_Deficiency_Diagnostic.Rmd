@@ -1,0 +1,31 @@
+---
+title: "Untitled"
+author: "Arfa Aijazi"
+date: "2026-02-23"
+output: html_document
+---
+```{r}
+library(tidyverse)
+
+# Load the preprocessed data
+data <- read_csv("../data/final_preprocessed_data.csv", show_col_types = FALSE)
+
+# Diagnostic Function
+cat("\n--- Investigating Rank Deficiency ---\n")
+fit <- lm(Thermostat_Temperature ~ ., data = data %>% select(-DateTime))
+
+# The 'alias' function finds linear dependencies the correlation check missed
+alias_info <- alias(fit)
+
+if(!is.null(alias_info$Complete)) {
+  cat("\n!!! CRITICAL REDUNDANCIES FOUND !!!\n")
+  cat("The following variables are causing 100% deficiency:\n")
+  print(rownames(alias_info$Complete))
+  
+  cat("\nMathematical relationship (Why they are redundant):\n")
+  print(alias_info$Complete)
+} else {
+  cat("\nNo global perfect linear dependencies found.\n")
+}
+```
+
